@@ -49,3 +49,48 @@ def authenticate_google_sheets():
         return None
 
     return service
+
+
+def access_and_modify_sheet():
+    # Authenticate and get the service object
+    service = authenticate_google_sheets()
+
+    # Specify your spreadsheet ID and the range you want to work with
+    spreadsheet_id = 'your_spreadsheet_id_here'  # Replace with your actual Spreadsheet ID
+    read_range = 'Sheet1!A1:D10'  # The range you want to read from
+
+    # Reading data from Google Sheets
+    try:
+        result = service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=read_range).execute()
+        values = result.get('values', [])
+        if not values:
+            print('No data found in the specified range.')
+        else:
+            print('Data from the spreadsheet:')
+            for row in values:
+                print(row)
+    except Exception as e:
+        print(f"Error reading data from Google Sheets: {e}")
+
+    # Writing new data to Google Sheets
+    write_range = 'Sheet1!E1'  # The range where you want to write data (starting cell E1)
+    new_values = [
+        ['Updated Data 1', 'Updated Data 2', 'Updated Data 3', 'Updated Data 4'],
+        ['New Row 2', 'Value B2', 'Value C2', 'Value D2'],
+    ]
+    body = {
+        'values': new_values
+    }
+
+    try:
+        result = service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=write_range,
+            valueInputOption='RAW', body=body).execute()
+
+        print(f"{result.get('updatedCells')} cells updated successfully.")
+    except Exception as e:
+        print(f"Error writing data to Google Sheets: {e}")
+
+if __name__ == "__main__":
+    access_and_modify_sheet()
+
