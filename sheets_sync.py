@@ -1,96 +1,187 @@
-import os
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+import threading
+import time
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+import os
+import mysql.connector
+from google_auth_oauthlib.flow import InstalledAppFlow
 
-# If modifying these SCOPES, delete the file token.json
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 def authenticate_google_sheets():
     creds = None
-    token_path = 'token.json'  # Path to store the token
-    credentials_path = 'auth/client_secret_765098273427-ldd03ksfn0fa3bdnaq7e5mb4fe3knra4.apps.googleusercontent.com.json'  # Updated path to your credentials.json
-
-    # Check if token.json exists and load stored credentials
-    if os.path.exists(token_path):
-        try:
-            creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-        except Exception as e:
-            print(f"Error loading token.json: {e}")
-
-    # If there are no valid credentials or they're expired, re-authenticate
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
     if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                print(f"Error refreshing credentials: {e}")
-        else:
-            if not os.path.exists(credentials_path):
-                raise FileNotFoundError(f"Credentials file not found: {credentials_path}")
-            
-            # Run OAuth flow and get new credentials
-            flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        # Save the new credentials for future use
-        try:
-            with open(token_path, 'w') as token:
-                token.write(creds.to_json())
-        except Exception as e:
-            print(f"Error saving token.json: {e}")
-
-    # Build the Google Sheets service
-    try:
-        service = build('sheets', 'v4', credentials=creds)
-    except Exception as e:
-        print(f"Error creating Google Sheets service: {e}")
-        return None
-
+        flow = InstalledAppFlow.from_client_secrets_file(
+            r'auth\client_secret_765098273427-ldd03ksfn0fa3bdnaq7e5mb4fe3knra4.apps.googleusercontent.com.json', SCOPES)
+        creds = flow.run_local_server(port=0)
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+    service = build('sheets', 'v4', credentials=creds)
     return service
 
+def connect_to_db():
+    try:
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="560095",
+            database="student_info"
+        )
+        return conn
+    except mysql.connector.Error as err:
+        print(f"Error: {err}")
+        return None
 
-def access_and_modify_sheet():
-    # Authenticate and get the service object
+def fetch_sheet_data():
     service = authenticate_google_sheets()
+    spreadsheet_id = '16gOodXlX96_IVp0AhfNSPX1d0hNE2FzzHf3Zw5lQD40'
+    range_name = 'Sheet1!A2:D'
+    result = service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=range_name).execute()
+    data = result.get('values', [])
+    
+    # Filter out rows with any empty fields
+    full_rows = [row for row in data if len(row) == 4 and all(field.strip() for field in row)]
+    return full_rows
 
-    # Specify your spreadsheet ID and the range you want to work with
-    spreadsheet_id = 'your_spreadsheet_id_here'  # Replace with your actual Spreadsheet ID
-    read_range = 'Sheet1!A1:D10'  # The range you want to read from
+def fetch_mysql_data():
+    conn = connect_to_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, first_name, last_name, email, phone_number FROM students")
+    data = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return data
 
-    # Reading data from Google Sheets
+def validate_row(row):
+    return len(row) == 4 and all(field.strip() for field in row)
+
+def insert_into_db(student_data):
+    conn = connect_to_db()
+    if conn is None:
+        print("Database connection failed.")
+        return
+    
+    cursor = conn.cursor()
+    query = "INSERT INTO students (first_name, last_name, email, phone_number) VALUES (%s, %s, %s, %s)"
+    
     try:
-        result = service.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=read_range).execute()
-        values = result.get('values', [])
-        if not values:
-            print('No data found in the specified range.')
+        cursor.executemany(query, student_data)
+        conn.commit()
+        print(f"{cursor.rowcount} rows inserted successfully.")
+    except mysql.connector.Error as err:
+        print(f"Error: {err}")
+    finally:
+        cursor.close()
+        conn.close()
+
+def update_row_in_db(row):
+    conn = connect_to_db()
+    if conn is None:
+        print("Database connection failed.")
+        return
+    
+    cursor = conn.cursor()
+    update_query = "UPDATE students SET first_name = %s, last_name = %s, email = %s, phone_number = %s WHERE email = %s"
+    
+    try:
+        cursor.execute(update_query, (row[0], row[1], row[2], row[3], row[2]))
+        conn.commit()
+        print(f"Row with email {row[2]} updated successfully.")
+    except mysql.connector.Error as err:
+        print(f"Error: {err}")
+    finally:
+        cursor.close()
+        conn.close()
+
+def update_sheet_from_db():
+    try:
+        service = authenticate_google_sheets()
+        spreadsheet_id = '16gOodXlX96_IVp0AhfNSPX1d0hNE2FzzHf3Zw5lQD40'
+        range_name = 'Sheet1!A2:D'
+        
+        mysql_data = fetch_mysql_data()
+        values = [list(row[1:]) for row in mysql_data]  # Exclude 'id' from the values
+
+        existing_sheet_data = fetch_sheet_data()
+        if existing_sheet_data != values:
+            # Clear the sheet before updating
+            service.spreadsheets().values().clear(spreadsheetId=spreadsheet_id, range=range_name).execute()
+
+            body = {'values': values}
+            service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id, 
+                range=range_name, 
+                valueInputOption="RAW", 
+                body=body
+            ).execute()
+            print("Google Sheets successfully updated from the database.")
         else:
-            print('Data from the spreadsheet:')
-            for row in values:
-                print(row)
+            print("No changes detected in the database; Google Sheets not updated.")
     except Exception as e:
-        print(f"Error reading data from Google Sheets: {e}")
+        print(f"Error in update_sheet_from_db: {e}")
 
-    # Writing new data to Google Sheets
-    write_range = 'Sheet1!E1'  # The range where you want to write data (starting cell E1)
-    new_values = [
-        ['Updated Data 1', 'Updated Data 2', 'Updated Data 3', 'Updated Data 4'],
-        ['New Row 2', 'Value B2', 'Value C2', 'Value D2'],
-    ]
-    body = {
-        'values': new_values
-    }
-
+def sync_sheets_to_db():
     try:
-        result = service.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id, range=write_range,
-            valueInputOption='RAW', body=body).execute()
+        print("Syncing Google Sheets to Database...")
+        sheet_data = fetch_sheet_data()
+        mysql_data = fetch_mysql_data()
 
-        print(f"{result.get('updatedCells')} cells updated successfully.")
+        # Convert data for easier comparison
+        sheet_data_dict = {tuple(row): row for row in sheet_data}
+        mysql_data_dict = {tuple(row[1:]): row for row in mysql_data}
+
+        # Identify additions and updates
+        to_insert = []
+        to_update = []
+        for row in sheet_data_dict:
+            if row not in mysql_data_dict:
+                to_insert.append(sheet_data_dict[row])
+            elif sheet_data_dict[row] != mysql_data_dict[row][1:]:
+                # If the row exists but the data is different, it means the row should be updated
+                to_update.append(sheet_data_dict[row])
+
+        # Identify deletions
+        to_delete = [row for row in mysql_data_dict if row not in sheet_data_dict]
+
+        conn = connect_to_db()
+        if conn is None:
+            print("Database connection failed.")
+            return
+
+        cursor = conn.cursor()
+        
+        # Insert new data
+        if to_insert:
+            insert_into_db(to_insert)
+        
+        # Update existing data
+        if to_update:
+            for row in to_update:
+                update_row_in_db(row)
+
+        # Delete removed data
+        delete_query = "DELETE FROM students WHERE email = %s"
+        if to_delete:
+            cursor.executemany(delete_query, [(row[2],) for row in to_delete])
+            conn.commit()
+            print(f"{cursor.rowcount} rows deleted successfully.")
+
+        cursor.close()
+        conn.close()
     except Exception as e:
-        print(f"Error writing data to Google Sheets: {e}")
+        print(f"Error during sync_sheets_to_db: {e}")
 
-if __name__ == "__main__":
-    access_and_modify_sheet()
+def sync_db_to_sheets():
+    update_sheet_from_db()
 
+def real_time_sync():
+    while True:
+        sync_sheets_to_db()
+        sync_db_to_sheets()
+        time.sleep(10)  # Sync every 10 seconds (adjust as necessary)
+
+if __name__ == '__main__':
+    sync_thread = threading.Thread(target=real_time_sync)
+    sync_thread.start()
